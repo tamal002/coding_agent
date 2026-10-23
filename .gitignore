@@ -1,0 +1,33 @@
+# Local secrets
+.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# Local apps/copies
+workspaces/
+artifacts/
+runs/
