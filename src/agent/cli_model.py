@@ -1,7 +1,8 @@
-"""Interactive ``agent model`` sub-app: add, list, use and remove saved models.
+"""The ``agent model`` sub-commands: add, list, use and remove saved models.
 
-The wizard writes model preferences to ``model_config.json`` and API keys to
-the OS keyring (skipped for Ollama, skipped when a key is already stored).
+`add` asks the user step by step (provider → model → API key if needed).
+Model choices are saved to ``model_config.json``; API keys go to the OS
+keyring, never to a file.
 """
 
 from __future__ import annotations
@@ -21,19 +22,27 @@ app = typer.Typer(
 )
 console = Console()
 
+# Providers that need an API key (Ollama does not need one).
 _NEEDS_KEY = frozenset({"openai", "anthropic", "deepseek", "custom"})
 
 
 def _load() -> store.ModelConfig:
+    """Read the model config file for now."""
     return store.load_config(paths.config_file(get_settings()))
 
 
 def _save(config: store.ModelConfig) -> None:
+    """Write the model config file back to disk."""
     store.save_config(config, paths.config_file(get_settings()))
 
 
+# to show the saved models to user
 def _prompt_choice(label: str, options: Sequence[str]) -> int:
-    """Numbered-choice prompt that survives bad input."""
+    """Show a numbered menu and return the chosen option's number (0-based).
+
+    Keeps asking until the user types a valid number. Pressing Enter picks
+    option 1.
+    """
     console.print(f"[bold cyan]{label}[/bold cyan]")
     for index, option in enumerate(options, start=1):
         console.print(f"  [green]{index}.[/green] {option}")
@@ -44,7 +53,9 @@ def _prompt_choice(label: str, options: Sequence[str]) -> int:
         console.print(f"[red]Enter a number between 1 and {len(options)}.[/red]")
 
 
+# asks for the base URL for a custom provider, keeps asking until it starts with http(s)://
 def _prompt_base_url() -> str:
+    """Ask for the base URL and keep asking until it starts with http(s)://."""
     while True:
         url = str(typer.prompt("Base URL (OpenAI-compatible)")).strip()
         if url.startswith(("http://", "https://")):
@@ -52,7 +63,14 @@ def _prompt_base_url() -> str:
         console.print("[red]Base URL must start with http:// or https://[/red]")
 
 
+# asks for the API key for a provider, shows whether one is already stored, and saves it to the OS keyring if the user types one
 def _maybe_prompt_key(provider: str) -> None:
+    """Offer to save the provider's API key (skipped for Ollama).
+
+    First shows whether a key already exists ("already stored" / "not set").
+    If the user types one, it is saved to the OS keyring; pressing Enter
+    with nothing typed keeps things as they are.
+    """
     current = secrets.get_api_key(provider)
     status = "already stored" if current else "not set"
     console.print(f"API key for {provider}: {status} (keyring / {secrets.key_env_var(provider)})")
@@ -65,9 +83,14 @@ def _maybe_prompt_key(provider: str) -> None:
             console.print(f"[green]Key stored in the OS keyring for {provider}.[/green]")
 
 
+# defining 'add' command 
 @app.command("add")
 def add() -> None:
-    """Add a provider and model (plus API key when needed). Duplicates are refused."""
+    """Add a provider + model. If the same model is saved twice, nothing is added.
+
+    Asks: which provider, the model id, and the API key (only for non-Ollama
+    providers). Custom providers also ask for a base URL.
+    """
     try:
         config = _load()
         provider = store.WIZARD_PROVIDERS[_prompt_choice("Provider", store.WIZARD_PROVIDERS)]
@@ -89,9 +112,15 @@ def add() -> None:
         raise typer.Exit(1) from exc
 
 
+# defining 'list' command
 @app.command("list")
 def list_models() -> None:
-    """Show saved models per provider and the effective per-role mapping."""
+    """Show all saved models and which model each role actually uses.
+
+    The first part groups models by provider; "★" marks the general model.
+    The second part shows: an overridden role ("✎ override") or a role that
+    uses the general model ("↳ inherits general").
+    """
     config = _load()
     if not config.providers:
         console.print("[yellow]No models saved yet. Run 'agent model add'.[/yellow]")
@@ -135,6 +164,7 @@ def list_models() -> None:
         console.print("[yellow]No general model selected - run 'agent model use'.[/yellow]")
 
 
+# defining 'use' command
 @app.command("use")
 def use(
     role: str | None = typer.Argument(
@@ -144,7 +174,13 @@ def use(
         False, "--unset", help="Remove a role override (falls back to general)."
     ),
 ) -> None:
-    """Select the general model, or set/unset a per-role override."""
+    """Pick the model to use: the general one, or one for a specific role.
+
+    Without a role (or with "general"): sets the default model.
+    With a role (plan/code/summarize): sets that role's override.
+    With ``--unset``: removes a role's override, so it uses the general
+    model again. Only already-saved models can be picked.
+    """
     try:
         config = _load()
         if unset:
@@ -182,9 +218,14 @@ def use(
         raise typer.Exit(1) from exc
 
 
+# defining 'remove' command
 @app.command("remove")
 def remove() -> None:
-    """Remove a saved model (and any selection using it)."""
+    """Delete a saved model. Any selection that used it is cleared too.
+
+    If a provider ends up with no models left, offers to also delete its
+    stored API key from the keyring.
+    """
     try:
         config = _load()
         saved: list[tuple[str, str]] = [

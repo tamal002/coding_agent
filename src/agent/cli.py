@@ -1,4 +1,9 @@
-"""Console entrypoint for the agent CLI (placeholder until later phases)."""
+"""The ``agent`` command.
+
+Right now it only has the ``model`` sub-commands; task/plan/TUI commands are
+added in later phases. Typer builds ``agent --help`` from this file
+automatically.
+"""
 
 import typer
 
@@ -10,11 +15,11 @@ app.add_typer(model_app, name="model", help="Models per provider; keys live in t
 
 @app.callback()
 def callback() -> None:
-    """Placeholder entrypoint; commands are added in later phases."""
+    """Called for every ``agent ...`` run; the sub-commands do the real work."""
 
 
 def main() -> None:
-    """Entry point for direct execution (`uv run src/agent/cli.py`)."""
+    """Call this to run the CLI directly (`uv run src/agent/cli.py`)."""
     app()
 
 

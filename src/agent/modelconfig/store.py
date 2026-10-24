@@ -1,8 +1,7 @@
-"""Provider-keyed model selection store (``model_config.json``).
+"""Store for saved models: reads and writes ``model_config.json``.
 
-The JSON file holds preferences only — model ids, per-provider base urls and
-role selections. API keys never live here; they go to the OS keyring (see
-:mod:`agent.modelconfig.secrets`).
+The file holds only preferences (providers, models, selections).
+API keys are NOT saved here — they go to the OS keyring (see secrets.py).
 """
 
 from __future__ import annotations
@@ -15,20 +14,29 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+# Role names that can get their own model override.
 ROLE_NAMES: tuple[str, ...] = ("plan", "code", "summarize")
+# Providers shown in the `agent model add` menu.
 WIZARD_PROVIDERS: tuple[str, ...] = ("ollama", "openai", "anthropic", "deepseek", "custom")
+# Providers the agent can actually run right now (the rest are saved but refused).
 SUPPORTED_RUNTIME_PROVIDERS: tuple[str, ...] = ("ollama",)
+# File format version of model_config.json. Bump it when the JSON shape changes.
 _CONFIG_VERSION = 1
 
 
 class ConfigFormatError(Exception):
-    """Raised when ``model_config.json`` cannot be parsed or is a bad version."""
+    """Raised when model_config.json is broken or has an unknown version."""
 
 
-# The following classes are used to represent the structure of the model configuration JSON file. They are designed to be compatible with Pydantic for validation and serialization.
+# The classes below represent the structure of the model configuration JSON file. They are
+# designed to be compatible with Pydantic for validation and serialization.
 
 class ModelEntry(BaseModel):
-    """One user-selected model for one provider."""
+    """One saved model.
+
+    ``id`` is the model name the provider knows, e.g. "qwen2.5-coder:14b".
+    ``params`` holds extra provider settings and may be empty.
+    """
 
     id: str
     params: dict[str, Any] = Field(default_factory=dict)
@@ -36,27 +44,37 @@ class ModelEntry(BaseModel):
     @field_validator("id")
     @classmethod
     def _id_not_blank(cls, value: str) -> str:
+        """Reject an empty model id."""
         if not value.strip():
             raise ValueError("model id must not be blank")
         return value.strip()
 
 
 class ProviderEntry(BaseModel):
-    """Saved models for one provider plus an optional base url."""
+    """All saved models of one provider.
+
+    ``base_url`` is needed only for custom (OpenAI-compatible) providers;
+    for Ollama the base url comes from .env instead.
+    """
 
     base_url: str | None = None
     models: list[ModelEntry] = Field(default_factory=list)
 
 
 class ModelRef(BaseModel):
-    """A selection: which provider supplies which model id."""
+    """A saved choice: which provider gives us which model."""
 
     provider: str
     model_id: str
 
 
 class Selection(BaseModel):
-    """Current selection: one general model plus optional per-role overrides."""
+    """Which model the user chose to run things with.
+
+    ``general`` is the default model for every role.
+    ``roles`` holds models for specific roles only (plan, code, summarize).
+    If a role has no entry here, that role uses ``general``.
+    """
 
     general: ModelRef | None = None
     roles: dict[str, ModelRef] = Field(default_factory=dict)
@@ -64,6 +82,7 @@ class Selection(BaseModel):
     @field_validator("roles")
     @classmethod
     def _known_roles(cls, value: dict[str, ModelRef]) -> dict[str, ModelRef]:
+        """Only allow the role names plan, code, summarize."""
         for role in value:
             if role not in ROLE_NAMES:
                 raise ValueError(
@@ -73,7 +92,7 @@ class Selection(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """Root document of ``model_config.json``."""
+    """The whole model_config.json file — preferences only, never secrets."""
 
     version: int = _CONFIG_VERSION
     providers: dict[str, ProviderEntry] = Field(default_factory=dict)
@@ -81,14 +100,18 @@ class ModelConfig(BaseModel):
 
 
 def empty_config() -> ModelConfig:
-    """Return a fresh, empty configuration."""
+    """Return an empty config — the state when no file exists yet."""
     return ModelConfig()
 
 
 # Utility functions for loading, saving, and manipulating the model configuration.
 
 def load_config(path: Path) -> ModelConfig:
-    """Load the config file, or return an empty config when it does not exist."""
+    """Read the JSON file and return the config as Python objects.
+
+    If the file does not exist, return an empty config (clean first run).
+    Raises ConfigFormatError if the JSON is broken or the version is unknown.
+    """
     if not path.exists():
         return empty_config()
     try:
@@ -104,7 +127,12 @@ def load_config(path: Path) -> ModelConfig:
 
 
 def save_config(config: ModelConfig, path: Path) -> None:
-    """Atomically write the config file."""
+    """Save the config to the JSON file safely.
+
+    Writes to a temp file first, then replaces the real file with it
+    (``os.replace``), so the file is never left half-written.
+    Creates the parent folders if needed.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".model_config", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -125,11 +153,11 @@ def add_model(
     model_id: str,
     base_url: str | None = None,
 ) -> bool:
-    """Add a model for a provider. Returns ``False`` when it already exists.
+    """Add a model under a provider. Returns ``False`` if it already exists.
 
-    Dedup is on the ``(provider, model_id)`` pair — the same id may exist under
-    two providers. ``base_url`` is only stored for OpenAI-compatible providers
-    (e.g. ``custom``) and updates an existing entry.
+    The same model name may exist under two different providers.
+    ``base_url`` is only stored for custom (OpenAI-compatible) providers,
+    and also updates an existing entry.
     """
     entry = config.providers.setdefault(provider, ProviderEntry())
     if base_url:
@@ -141,7 +169,11 @@ def add_model(
 
 
 def remove_model(config: ModelConfig, provider: str, model_id: str) -> bool:
-    """Remove a model and any selection referencing it. Returns ``False`` when absent."""
+    """Remove a model, and clear any selection that was using it.
+
+    Returns ``True`` if the model was removed, ``False`` if it was not found.
+    If the provider has no models left, the provider is removed too.
+    """
     entry = config.providers.get(provider)
     if entry is None:
         return False
@@ -168,19 +200,26 @@ def remove_model(config: ModelConfig, provider: str, model_id: str) -> bool:
 
 
 def _require_saved(config: ModelConfig, provider: str, model_id: str) -> None:
+    """Check that the model is saved. Raises ``ValueError`` if it is not."""
     entry = config.providers.get(provider)
     if entry is None or all(item.id != model_id for item in entry.models):
         raise ValueError(f"{provider}/{model_id} is not saved; run 'agent model add' first.")
 
 
 def set_general(config: ModelConfig, provider: str, model_id: str) -> None:
-    """Set the general model used by every role without an override."""
+    """Set the default model that every role uses (unless it has its own).
+
+    Raises ``ValueError`` if the model is not saved.
+    """
     _require_saved(config, provider, model_id)
     config.selection.general = ModelRef(provider=provider, model_id=model_id)
 
 
 def set_role(config: ModelConfig, role: str, provider: str, model_id: str) -> None:
-    """Set a role override. Roles must be one of ``ROLE_NAMES``."""
+    """Set a model for one specific role, e.g. 'plan'.
+
+    Raises ``ValueError`` if the role name is wrong or the model is not saved.
+    """
     if role not in ROLE_NAMES:
         raise ValueError(f"unknown role {role!r}; expected one of {ROLE_NAMES}")
     _require_saved(config, provider, model_id)
@@ -188,14 +227,18 @@ def set_role(config: ModelConfig, role: str, provider: str, model_id: str) -> No
 
 
 def unset_role(config: ModelConfig, role: str) -> None:
-    """Drop a role override so the role inherits the general model again."""
+    """Remove a role override, so that role uses the general model again."""
     if role not in ROLE_NAMES:
         raise ValueError(f"unknown role {role!r}; expected one of {ROLE_NAMES}")
     config.selection.roles.pop(role, None)
 
 
 def effective_model(config: ModelConfig, role: str | None) -> ModelRef | None:
-    """Return the model a role effectively uses (override → general → None)."""
+    """Return the model a role will actually use.
+
+    The role's own override comes first; if it has none, the general model is
+    used; ``None`` means nothing is selected at all.
+    """
     if role is not None:
         ref = config.selection.roles.get(role)
         if ref is not None:

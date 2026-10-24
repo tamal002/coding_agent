@@ -1,11 +1,12 @@
-"""Resolve which model runs a given role — never by guessing.
+"""Decide which model runs a given role — never by guessing.
 
-Chain (highest wins):
+The check order (first match wins):
 
-1. Env overrides ``MODEL_{ROLE}`` / ``MODEL_NAME`` — always provider ``ollama``
-2. ``selection.roles[role]`` from ``model_config.json``
-3. ``selection.general`` from ``model_config.json``
-4. ``ConfigError`` naming the exact missing step
+1. Env vars: ``MODEL_PLAN`` / ``MODEL_CODE`` / ``MODEL_SUMMARIZE``, then
+   ``MODEL_NAME`` (these are always Ollama models)
+2. The role's own selection from ``model_config.json``
+3. The general model from ``model_config.json``
+4. If nothing is found, raise ``ConfigError`` and explain exactly what to do
 """
 
 from __future__ import annotations
@@ -25,7 +26,12 @@ if TYPE_CHECKING:  # pragma: no cover
 
 @dataclass(frozen=True)
 class ResolvedModel:
-    """The model a role resolved to, plus where the choice came from."""
+    """The final answer to "which model runs this role?".
+
+    ``provider`` is the backend, e.g. "ollama" (env choices are always Ollama).
+    ``model_id`` is the exact model name to use — never invented here.
+    ``source`` records where the choice came from: "env" or "config".
+    """
 
     provider: str
     model_id: str
@@ -33,17 +39,35 @@ class ResolvedModel:
 
 
 def _settings(settings: Settings | None) -> Settings:
+    """Return the settings to read env values from.
+
+    Tests pass their own settings here (with a temp data dir);
+    normal runs use the one cached settings instance.
+    """
     if settings is not None:
         return settings
     return config_module.get_settings()
 
 
 def _require_known_role(role: str | None) -> None:
+    """Check the role name is plan / code / summarize (or None = general).
+
+    Any other name raises ``ValueError``, so a typo can never pick a wrong
+    model by accident.
+    """
     if role is not None and role not in store.ROLE_NAMES:
         raise ValueError(f"unknown role {role!r}; expected one of {store.ROLE_NAMES}")
 
 
 def _from_env(role: str | None, settings: Settings) -> ResolvedModel | None:
+    """Try to find the model in env vars / .env (step 1).
+
+    For a role, read its own env field first (e.g. ``MODEL_PLAN`` for plan).
+    If that is empty, fall back to ``MODEL_NAME``. Any model found here is
+    treated as an Ollama model, because env model names are local.
+
+    Returns ``None`` when nothing relevant is set at this layer.
+    """
     if role == "plan":
         role_value = settings.model_plan
     elif role == "code":
@@ -60,6 +84,11 @@ def _from_env(role: str | None, settings: Settings) -> ResolvedModel | None:
 
 
 def _from_config(role: str | None, settings: Settings) -> ResolvedModel | None:
+    """Try to find the model in model_config.json (steps 2-3).
+
+    Asks the store which model the role uses: the role's own override first,
+    otherwise the general model. Returns ``None`` when nothing is selected.
+    """
     config = store.load_config(paths.config_file(settings))
     ref: ModelRef | None = store.effective_model(config, role)
     if ref is None:
@@ -71,7 +100,16 @@ def resolve_model(
     role: str | None = None,
     settings: Settings | None = None,
 ) -> ResolvedModel:
-    """Resolve the model for a role or raise ``ConfigError``. Never invents one."""
+    """Return the model for the role — or raise ``ConfigError`` with the fix.
+
+    Order: env first, then the role's selection, then the general model.
+    ``role`` is None for the general model, or plan/code/summarize.
+
+    Raises:
+        ValueError: for an unknown role name.
+        ConfigError: when no model is selected anywhere. The message says
+            exactly what to run or set — a model is never invented.
+    """
     _require_known_role(role)
     active = _settings(settings)
 
@@ -96,7 +134,12 @@ def resolve_model(
 
 
 def ensure_runtime_provider(provider: str) -> None:
-    """Refuse providers the current runtime cannot execute (Ollama-only)."""
+    """Refuse providers the agent cannot run yet (only Ollama works now).
+
+    Other providers may be saved in the JSON file, but the agent cannot talk
+    to them yet. Instead of silently sending their model names to the local
+    Ollama server, this raises a clear ``ConfigError``.
+    """
     if provider not in store.SUPPORTED_RUNTIME_PROVIDERS:
         raise ConfigError(
             f"Provider {provider!r} is saved but the runtime currently supports only "
