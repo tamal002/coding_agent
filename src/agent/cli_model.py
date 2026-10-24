@@ -63,7 +63,8 @@ def _prompt_base_url() -> str:
         console.print("[red]Base URL must start with http:// or https://[/red]")
 
 
-# asks for the API key for a provider, shows whether one is already stored, and saves it to the OS keyring if the user types one
+# asks for the API key for a provider, shows whether one is already stored, and saves it
+# to the OS keyring if the user types one
 def _maybe_prompt_key(provider: str) -> None:
     """Offer to save the provider's API key (skipped for Ollama).
 

@@ -15,6 +15,7 @@ dependencies = [
   "langgraph==1.2.16",
   "langgraph-checkpoint-postgres==3.2.0",
   "langchain-core==1.6.13",
+  "langchain==1.4.7",
   "langchain-ollama==1.1.0",
   "langchain-mcp-adapters==0.3.2",
   "pydantic==2.11.7",
@@ -54,3 +55,8 @@ select = ["E", "F", "I", "UP", "B"]
 strict = true
 packages = ["agent"]
 plugins = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["live: calls the real Ollama server; skipped unless AGENT_LIVE=1"]

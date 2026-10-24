@@ -1,0 +1,2 @@
+# Reserved for a future per-model price table (never API keys).
+# Local Ollama models are free: the agent always reports $0.00 (local).
