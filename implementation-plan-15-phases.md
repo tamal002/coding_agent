@@ -1,6 +1,12 @@
+# Coding Agent — Combined Implementation Plan (Phase 3 onward)
+
+> This is the consolidated working plan for the remaining implementation. Phases 1, 1.5, and 2 are already implemented and reviewed; this document starts at Phase 3. The updated product decisions and shared contracts below take precedence for the remaining phases.
+
 # Coding Agent — 15-Phase Implementation Plan (for an AI coding agent)
 
 This file is the build contract. Read it fully once, then open the diagram `coding-agent-langgraph-no-openwiki.excalidraw` once. Both are the source of truth. Implement **exactly one phase per session**, in order.
+
+**Current build position (2026-10-25):** Phases 1, 1.5, and 2 are already implemented and reviewed. Preserve their working code and tests. The next implementation phase is **Phase 3**. Do not rerun or rewrite completed phases unless a concrete regression, contract conflict, security issue, or correctness defect requires it. The decisions in the “Locked product decisions” subsection below apply to Phase 3 onward.
 
 ---
 
@@ -30,6 +36,17 @@ Run flow: UI sends task → runner streams the graph → nodes and tools emit ty
 ---
 
 ## 2. Shared contracts (define these once, in the phase that says so, then reuse)
+
+### 2.0 Locked product decisions (apply from Phase 3 onward)
+
+These decisions are settled. Implement them in the phase listed below; do not reopen them unless a concrete technical contradiction is found. Phases 1, 1.5, and 2 are already implemented and should remain unchanged otherwise.
+
+1. **One long-lived conversation thread, multiple tasks (Q1).** A TUI session uses one `thread_id` for its lifetime. A follow-up message is a new task in that same thread, routed through `N1 → R1 → N2`; it is not a new thread. Keep prior messages and prior-task context/results available. `N2` must distinguish the current request from prior tasks and must not blindly reuse an old plan as the new task's plan. Add the minimum task-history representation when Phase 8 introduces persistent state; finish task-context semantics in Phase 12 and budget semantics in Phase 14.
+2. **Reject new input while a run is active (Q2).** No input queue. While `RunController` is running, the TUI disables/rejects new task submissions and explains that the agent is busy. Cancellation and quit remain available. Approval requests are still handled one at a time through the shared approval inbox. Phase 4 adds the visible busy/reject behavior; later phases must preserve it.
+3. **Explicit source project (Q3).** Do not auto-detect the current working directory. Support a configured `SOURCE_DIR` and/or `--project PATH` on the launch/`agent run` command. Phase 4 may expose the CLI/config surface; Phase 5 validates that the path exists, is a directory, and is not the agent's own data directory, then copies that repository into `<data_dir>/workspaces/<thread_id>/`. Never edit the source repository directly.
+4. **Fail-fast dependency health (Q4).** Before opening the TUI or starting a graph run, perform a cheap reachability probe for Ollama. Once Phase 8 introduces checkpointed sessions, also check Postgres when the requested mode needs persistence. On failure, exit before launching the unusable interface and print an actionable message; never silently switch providers or databases. Keep the full `agent doctor` command for Phase 15.
+5. **Configurable one-shot persistence (Q5).** `agent run TASK` supports a persisted/resumable mode through a setting plus `--persist` / `--no-persist`. Persisted runs use the same Postgres checkpointer and session/thread model as TUI sessions; ephemeral runs compile/run without `AsyncPostgresSaver` and do not checkpoint. Use one graph-building path with an optional checkpointer, not duplicate graph implementations. Default to **off** for one-shot runs unless the human explicitly changes the setting/flag. TUI sessions are persistent and resumable by default.
+6. **Session identifier convention.** Phase 8 must choose and document a safe `thread_id` generation convention before implementing session creation. IDs must satisfy the existing path-safety constraint (`^[A-Za-z0-9_-]{1,64}$`). Do not expose arbitrary user-provided IDs as filesystem paths. Keep the identifier stable for resume; a human-readable title may be stored/displayed separately.
 
 ### 2.1 Event (phase 3 creates it)
 Base fields on every event: `kind: str`, `run_id: str`, `thread_id: str`, `ts: float`, `step_id: str | None`, `agent: str | None`.
@@ -73,6 +90,7 @@ Fields and the phase that adds each:
 - `task: Task | None` and `plan: Plan | None` — phase 12
 - `ready_steps: list[str]` and `step_results: dict[str, StepResult]` (merge reducer keyed by step ID) — phase 13
 - `error: ErrorInfo | None`, `attempts: dict[str, int]`, and `budget: BudgetState` — phase 14
+- Multi-task session continuity: when Phase 8 adds `thread_id`/`run_id`, also add the minimum task-history/current-task identity needed to retain prior task summaries, plans, and step results while a new task is analyzed. Use checkpointed graph state; do not create a second full-state store. Phase 12 must read relevant prior-task context without blindly treating an old task's plan as the new task's plan.
 
 Add state fields in the phase that first needs them. Do not duplicate checkpoint-owned state in custom tables.
 
@@ -235,158 +253,6 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 
 ---
 
-## Phase 1 — Project skeleton, configuration and tooling
-
-**Goal:** an empty folder becomes a versioned, linted, tested project with config, paths, and all pinned dependencies. Nothing agentic yet.
-
-**Depends on:** nothing.
-**Diagram:** none (foundation).
-
-**Create**
-- `pyproject.toml` (Python 3.11.2, package `agent`, console script `agent = "agent.cli:app"`)
-- `.python-version` containing `3.11.2`
-- `README.md`, `PHASE_LOG.md`, `.gitignore` (must include `.env`, `workspaces/`, `__pycache__/`, `.venv/`), `.env.example`, and a local `.env` (git-ignored, never committed)
-- `src/agent/__init__.py`, `src/agent/config.py`, `src/agent/infra/paths.py`, `src/agent/infra/__init__.py`
-- Folder skeleton with empty `__init__.py`: `src/agent/{events,runtime,llm,nodes,routers,subagents,tools,context,memory,safety,infra,ui}/`, `tests/{unit,graph,ui,chaos}/`, `config/`, `docker/`, `migrations/`
-- `.github/workflows/ci.yml` (runs ruff, mypy, pytest on push)
-- `.pre-commit-config.yaml` (ruff hook)
-
-**Implementation steps**
-1. Use the system Python `3.11.2`; do not install another Python. `uv init --package --name agent --python 3.11.2` is not required; create `pyproject.toml` and `.python-version` directly.
-2. Add all runtime dependencies now, pinned to the versions in section 2.8: `langgraph`, `langgraph-checkpoint-postgres`, `langchain-core`, `langchain-ollama`, `langchain-mcp-adapters`, `pydantic`, `pydantic-settings`, `platformdirs`, `keyring`, `typer`, `rich`, `textual`, `psutil`. Dev deps: `pytest`, `pytest-asyncio`, `pytest-textual-snapshot`, `ruff`, `mypy`, `pre-commit`. Import only `pydantic`, `pydantic-settings`, `platformdirs`, `typer` and `pytest` in this phase.
-3. `config.py`: `class Settings(BaseSettings)` with fields:
-   - `provider: Literal["ollama"] = "ollama"`
-   - `model_name: str = ""` (env `MODEL_NAME`; required when a model is requested)
-   - `model_plan: str = ""`, `model_code: str = ""`, `model_summarize: str = ""` (optional per-role overrides; empty means fall back to `MODEL_NAME`)
-   - `ollama_base_url: str = "http://127.0.0.1:11434"`, `ollama_num_ctx: int = 8192`, `ollama_keep_alive: str = "30m"`, `validate_model_on_init: bool = False`
-   - `data_dir: Path` (default `platformdirs.user_data_dir("agent")`, env override `AGENT_DATA_DIR`)
-   - `max_iterations_per_step: int = 25`, `max_parallel: int = 4`, `tool_timeout_s: int = 120`
-   - `max_total_tokens: int = 500_000`, `max_wall_minutes: int = 60`, `max_cost_usd: float = 5.0` (kept for UI parity; local cost is zero)
-   - `permission_mode: Literal["ask", "auto-safe", "trusted"] = "ask"`
-   - `approval_timeout_s: int = 0` (0 = wait indefinitely)
-   Read from `.env` and env vars. Provide `get_settings()` with `functools.lru_cache`, `get_model_name(role)` that returns the role override or `model_name`, and `ConfigError` raised by `get_model_name` when both are empty. The error must name the exact env var (`MODEL_NAME` or `MODEL_PLAN`/`MODEL_CODE`/`MODEL_SUMMARIZE`) and must never guess a model.
-4. `.env.example` (and local `.env`) contains:
-   ```dotenv
-   MODEL_NAME=
-   MODEL_PLAN=
-   MODEL_CODE=
-   MODEL_SUMMARIZE=
-   OLLAMA_BASE_URL=http://127.0.0.1:11434
-   OLLAMA_NUM_CTX=8192
-   OLLAMA_KEEP_ALIVE=30m
-   # AGENT_DATA_DIR=  (leave commented; empty would override the platform default)
-   ```
-   Leave every model blank for the human to fill. Do not invent a model name.
-5. `infra/paths.py`: functions `data_dir()`, `workspace_dir(thread_id)`, `artifacts_dir(thread_id)`, `runs_dir()`, `undo_dir(workspace, patch_id)`. Each creates its folder if missing. Pure functions, no side effects other than mkdir.
-6. Configure `ruff` (line length 100, rules E,F,I,UP,B) and `mypy --strict` for `src/agent`.
-7. Write the CI workflow and the pre-commit hook.
-8. Create `PHASE_LOG.md` with the header and a `Phase 1` entry.
-
-**Tests to write** (`tests/unit/test_config.py`, `tests/unit/test_paths.py`)
-- Settings read defaults when no env is set (use `_env_file=None`).
-- `AGENT_DATA_DIR` overrides `data_dir`; `OLLAMA_NUM_CTX` parses as an int.
-- `get_model_name("plan")` falls back to `MODEL_NAME`; `MODEL_PLAN` overrides; both empty raises `ConfigError` naming the env var.
-- `workspace_dir("t1")` is under `data_dir()/workspaces/t1` and the folder exists.
-- `workspace_dir("../etc")` raises `ValueError` (thread ids must match `^[A-Za-z0-9_-]{1,64}$`).
-
-**Test gate**
-- `uv run ruff check .` → no errors
-- `uv run mypy src` → no errors
-- `uv run pytest` → all pass
-- `uv run agent --help` → prints usage (the CLI can be a placeholder with no subcommands yet; create it in this phase as `src/agent/cli.py` with an empty `typer.Typer()`).
-
-**Done when**
-- Gate green locally; the human pushes a branch to check CI (the implementing agent does not push).
-- `.env` is git-ignored (`git check-ignore .env` prints `.env`).
-- No model name is guessed anywhere.
-
-**Do NOT:** import LangGraph or an LLM package yet, build Textual screens, or add Docker files. Do not commit, tag, push, or create branches.
-
-**Report back:** Python version, pinned versions, CI status, the paths printed by `agent --help`, `config` defaults, and the exact empty-model error text.
-
----
-
-## Phase 1.5 — Model selection store, keyring secrets, and the `agent model` CLI
-
-**Goal:** replace the "one model in `.env`" UX with a curated, provider-keyed store: `model_config.json` for preferences, the OS keyring for API keys, and `agent model add|list|use|remove` commands. The runtime stays Ollama-only; non-Ollama selections may be stored but are flagged "not runnable yet" and refused at call time.
-
-**Depends on:** Phase 1.
-**Diagram:** none (CLI/config layer only).
-
-**Create**
-- `src/agent/modelconfig/store.py` — `ModelConfig` schema (`version: 1`; `providers.{provider} -> {base_url?, models[]}`; `selection` = `general` + optional role map keyed `plan|code|summarize`), atomic save/load with a format-version guard, `add_model` (dedup on the `(provider, model_id)` pair), `remove_model` (also clears selection references and empty providers), `set_general` / `set_role` / `unset_role`, `effective_model` (role → general inheritance by absence).
-- `src/agent/modelconfig/secrets.py` — keyring wrapper: service `coding-agent`, account `{provider}:api_key`; precedence env var `{PROVIDER}_API_KEY` > keyring; `get/set/clear/has`.
-- `src/agent/modelconfig/resolver.py` — `resolve_model(role)`: env override (`MODEL_{ROLE}` then `MODEL_NAME`, always provider `ollama`) → `selection.roles[role]` → `selection.general` → `ConfigError` naming the exact fix; `ensure_runtime_provider` refuses non-Ollama until the provider-extension phase; unknown roles raise `ValueError`.
-- `src/agent/cli_model.py` — Typer sub-app registered as `agent model`: interactive `add` (provider list `ollama/openai/anthropic/deepseek/custom (OpenAI-compatible base_url)`; model id prompt; hidden API-key prompt skipped for Ollama and skipped when one is already stored; duplicate → "already saved, nothing added"), `list` (models grouped by provider with ★ general marker / "saved — runtime: ollama-only" flag, plus the effective general/plan/code/summarize mapping), `use [role]` with `--unset`, `remove` (cleans selections; offers key removal when the provider empties).
-- `tests/unit/test_modelconfig.py`, `tests/unit/test_secrets.py`, `tests/unit/test_resolver.py`
-
-**Modify**
-- `src/agent/infra/paths.py`: add `config_file()` → `data_dir()/model_config.json`.
-- `src/agent/config.py`: `get_model_name` delegates to the resolver (env overrides keep winning for CI/automation); drop the old role-env var mapping there.
-- `src/agent/cli.py`: register the `model` sub-app.
-- `tests/unit/test_config.py`: model tests rewritten to the new precedence (env > JSON > error); pure Settings-field tests unchanged.
-- `.env.example` / `.env` / `README.md` / `PHASE_LOG.md` / `opencode.md` / this plan.
-
-**Decisions locked**
-- API keys live only in the OS keyring (or env) — never plaintext in `model_config.json`.
-- Precedence: env > keyring for keys; env > JSON for model selection.
-- Wizard providers: `ollama / openai / anthropic / deepseek / custom (OpenAI-compatible base_url)`.
-- No network validation of model ids yet (that is doctor / the provider-extension phase).
-
-**Test gate**
-- `uv run ruff check .`, `uv run mypy src`, `uv run pytest` — all green.
-- `uv run agent --help` shows the `model` command; `uv run agent model list` works (smoke-tested with a temporary `AGENT_DATA_DIR`).
-- Keyring is faked/mocked in tests; nothing touches the real keyring or the network.
-
-**Done when**
-- Selection survives restart (file-backed), roles inherit the general model by absence, duplicates cannot be created twice, and the fail-loud rule holds: an unresolvable selection raises `ConfigError` naming the missing step — never an invented model.
-
-**Do NOT:** add cloud LLM SDKs to the runtime, make the graph call non-Ollama providers, or store API keys in `model_config.json`. Do not commit, tag, push, or create branches.
-
----
-
-## Phase 2 — LLM provider layer, usage tracking and a fake model
-
-**Goal:** every model call in the project goes through one function backed by local Ollama. Tests use a scripted fake model, so no test needs the network.
-
-**Depends on:** 1.
-**Diagram:** the "LLM provider" concept used by all LLM nodes (N2, N4, N5 planning, agent_llm, N9, N10). No node yet.
-
-**Create**
-- `src/agent/llm/provider.py`
-- `src/agent/llm/structured.py`
-- `src/agent/llm/usage.py`
-- `src/agent/llm/__init__.py`
-- `tests/fakes.py` (the scripted fake model)
-
-**Implementation steps**
-1. Use `langchain-ollama==1.1.0` (`ChatOllama`) and `langchain-core==1.6.13`. No other provider package, no API key.
-2. `provider.py`: `def get_model(role: Literal["plan","code","summarize"]) -> BaseChatModel`. Resolve the model name with `Settings.get_model_name(role)`; an empty name raises `ConfigError` naming `MODEL_NAME` or the role override. Build `ChatOllama(model=name, base_url=settings.ollama_base_url, num_ctx=settings.ollama_num_ctx, keep_alive=settings.ollama_keep_alive, validate_model_on_init=settings.validate_model_on_init)`. Never log secrets or send a request during construction.
-3. `structured.py`: `async def structured_invoke(model, schema, messages, role=...)`. Try `model.with_structured_output(schema, method="json_schema")`; if the model rejects that method, fall back to `method="function_calling"`; if validation still fails, make one repair call with the validation error and the schema, then fail with a typed `StructuredOutputError`. Do not loop forever.
-4. `usage.py`: `class UsageTracker` accumulates input/output tokens from `usage_metadata` and records cost. Ollama is local: `cost_usd=0.0` and the UI renders `$0.00 (local)`. Keep `config/prices.yaml` optional and empty; unknown local models are still zero, not an error.
-5. `tests/fakes.py`: `class ScriptedChatModel(BaseChatModel)` that returns pre-written `AIMessage`s in order and reports fixed `usage_metadata`. It must support `.bind_tools()` as a no-op returning self, `.with_structured_output()` for test schemas, and streaming by yielding the whole text as one chunk. This class is used by every later phase's tests.
-6. Add `provider.get_model` injection hook: a module-level `_factory` that tests can replace (`set_model_factory(fn)`), so graph code never imports a provider directly.
-7. Provide a `live` marker test that calls Ollama once and is skipped by default. It is the only test allowed to touch the network.
-
-**Tests** (`tests/unit/test_provider.py`, `tests/unit/test_usage.py`, `tests/unit/test_structured.py`)
-- With `set_model_factory(lambda role: ScriptedChatModel([...]))`, `get_model("plan").invoke(...)` returns the scripted text.
-- Missing `MODEL_NAME` raises `ConfigError` naming `MODEL_NAME`; missing `MODEL_PLAN` override falls back correctly.
-- `UsageTracker.record` sums tokens; Ollama cost is `0.0`; the display string is `$0.00 (local)`.
-- Structured output uses `json_schema` when available, falls back to `function_calling`, retries exactly once on a validation error, then raises.
-- Non-live tests make no network calls (assert by monkeypatching the HTTP client).
-
-**Test gate:** ruff, mypy, pytest green.
-
-**Manual demo:** with the human's `MODEL_NAME` set and Ollama running, `uv run python -c "..."` streams one short reply. Otherwise use `ScriptedChatModel`.
-
-**Done when:** every LLM call in the codebase is available only through `get_model`; `ScriptedChatModel` exists and is tested; `MODEL_NAME` is never guessed.
-
-**Do NOT:** call any real API in non-live tests; add another provider; put a key in code or config files; set a default model name.
-
-**Report back:** model resolution rules, empty-model error text, structured-output fallback results, fake-model usage example.
-
----
-
 ## Phase 3 — Event contract, emitter and graph-stream adapter
 
 **HLD elements:** shared event contract; graph/tool event stream; UI-independent runtime events.
@@ -411,6 +277,7 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 6. Map interrupts by stable `Interrupt.id`; avoid emitting duplicate pending-approval events when a run resumes or replays.
 7. The runner consumes the graph stream and yields typed events. It must not render terminal UI or own business logic.
 8. Keep event delivery UI-neutral. This does not authorize an HTTP server or web API.
+9. Include enough event/run metadata to distinguish separate task runs inside one long-lived `thread_id`; a follow-up task gets a new `run_id` while retaining the session `thread_id`. Do not make the event layer responsible for deciding whether an incoming prompt is a follow-up; it only transports the task the controller accepted.
 
 ### Tests
 
@@ -441,17 +308,22 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 - `src/agent/graph.py` — a deliberately temporary graph shell.
 - `src/agent/ui/plain.py` — plain terminal rendering.
 - `src/agent/ui/app.py` and `src/agent/ui/app.tcss` — minimal Textual app.
-- `src/agent/cli.py` — `agent run TASK [--plain|--json]`; `agent` without a task opens the TUI.
+- `src/agent/cli.py` — `agent run TASK [--plain|--json] [--project PATH] [--persist|--no-persist]`; `agent` without a task opens the TUI. Add `agent resume <thread_id>` in Phase 8, not as a fake Phase 4 implementation.
+- Minimal configuration surface for `SOURCE_DIR` (CLI `--project PATH` overrides it) and the one-shot persistence preference. Do not add the workspace-copy implementation before Phase 5.
 - UI/CLI smoke tests.
 
 ### Implementation
 
 1. Use one temporary response node calling the Phase 2 provider. Label it clearly as a phase-4 placeholder; replace it as the HLD nodes are implemented.
 2. All interfaces consume the shared runner/events. Do not call graph nodes directly from the UI.
-3. JSON mode emits valid JSON Lines; plain mode prints readable progress; TUI provides transcript, input, status, and cancel/quit.
-4. Keep the core headless. Only `src/agent/ui/` may import Textual or Rich.
-5. Keep the UI responsive, but do not add advanced widgets, slash-command frameworks, themes, or a command palette.
-6. Normal tests use the fake/scripted model. Live Ollama tests are opt-in and skipped by default.
+3. JSON mode emits valid JSON Lines; plain mode prints readable progress; TUI provides a multi-turn transcript, input, status, and cancel/quit. The TUI is intended to provide a Claude Code/Codex-like interaction pattern, but do not treat this as a requirement to copy their visual design.
+4. While a run is active, show a busy state and reject/disable additional prompt submission. Do not queue user messages. Cancellation and quit must remain available.
+5. Before opening the TUI or starting a run, perform a cheap Ollama reachability probe. If unavailable, exit with an actionable message; do not open a broken TUI or silently change providers. Test the probe with a fake client. Postgres probing is added in Phase 8 for modes that require persistence.
+6. Surface `SOURCE_DIR` / `--project PATH` without auto-detecting the current directory. Phase 4 may validate that a value was supplied/configured; full directory safety checks and copying belong to Phase 5.
+7. Expose `--persist` and `--no-persist` for `agent run TASK` and a config preference, with default off. In Phase 4, the temporary graph may honor the interface and report the mode, but do not implement Postgres persistence early. TUI sessions are intended to be persistent once Phase 8 lands.
+8. Include a minimal header/status area for model, selected project/workspace (when known), and execution mode. Keep it functional and compact; no advanced widget system, slash-command framework, themes, or command palette.
+9. Keep the core headless. Only `src/agent/ui/` may import Textual or Rich.
+10. Normal tests use the fake/scripted model. Live Ollama tests are opt-in and skipped by default.
 
 ### Tests
 
@@ -459,12 +331,14 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 - Plain mode renders a scripted response.
 - Textual smoke test submits a prompt and receives the scripted response.
 - Cancelling a run leaves no stuck worker.
-
-**Test gate:** lint, type checks, tests, and a short manual CLI/TUI demo pass.
+- A second prompt submitted during a run is visibly rejected/disabled and is not queued; cancel and quit remain usable.
+- Ollama-unavailable startup exits before the TUI opens and prints an actionable error.
+- `--project`/`SOURCE_DIR` precedence is tested; no current-directory auto-detection occurs.
+- `agent run` accepts mutually exclusive `--persist` / `--no-persist` and defaults to ephemeral mode.
 
 **Done when:** the same temporary graph works through plain CLI, JSON CLI, and TUI.
 
-**Do not:** implement planning, MCP, persistence, or real tool use here. The temporary graph is not the final HLD workflow.
+**Do not:** implement planning, MCP, Postgres checkpointing, workspace copying, or real tool use here. The temporary graph is not the final HLD workflow. Do not implement `agent resume` until Phase 8.
 
 **Report back:** the three interface demos and test results.
 
@@ -487,15 +361,16 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 
 ### Implementation
 
-1. Use the configured data directory and workspace layout from section 2.5. Work only in a copy of the source repository.
-2. Exclude `.git` internals and the agent's own workspace/data directory from the copy. Do not change the user's original working tree.
-3. Resolve every model-supplied path against the workspace root. Reject path traversal, absolute-path escapes, and symlinks resolving outside the root.
-4. Add bounded, useful read tools. Include paths and line numbers in results when possible.
-5. Prefer `rg` when installed and provide a tested Python fallback for text search.
-6. The common wrapper emits `tool_started`/`tool_finished`, records duration, and returns a structured tool error. It must not swallow LangGraph control-flow exceptions.
-7. Tool metadata includes name, kind, risk, and allowed agents. Unknown tools are risky by default, as specified in section 2.4.
-8. Keep the registry direct and local. Do not create a plugin marketplace or dynamic installer.
-
+1. Resolve the source project from explicit `--project PATH` first, then configured `SOURCE_DIR`. Do not auto-detect the current working directory. If neither is supplied, fail with an actionable configuration/CLI message.
+2. Validate that the source path exists, is a directory, resolves to a real path, and is not the agent's own data directory or a path inside that data directory. Reject unsafe/suspicious paths before copying.
+3. Use the configured data directory and workspace layout from section 2.5. Work only in a copy of the source repository.
+4. Exclude `.git` internals and the agent's own workspace/data directory from the copy. Do not change the user's original working tree.
+5. Resolve every model-supplied path against the workspace root. Reject path traversal, absolute-path escapes, and symlinks resolving outside the root.
+6. Add bounded, useful read tools. Include paths and line numbers in results when possible.
+7. Prefer `rg` when installed and provide a tested Python fallback for text search.
+8. The common wrapper emits `tool_started`/`tool_finished`, records duration, and returns a structured tool error. It must not swallow LangGraph control-flow exceptions.
+9. Tool metadata includes name, kind, risk, and allowed agents. Unknown tools are risky by default, as specified in section 2.4.
+10. Keep the registry direct and local. Do not create a plugin marketplace or dynamic installer.
 ### Tests
 
 - Traversal, absolute-path, and symlink escapes are rejected.
@@ -603,7 +478,7 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 
 **HLD elements:** `S1 · Checkpointer`, `N1 · load_state`, `R1 · route_after_load`, thread identity and resume-after-restart.
 
-**Goal:** persist graph execution and establish the correct entry path for new versus resumed tasks.
+**Goal:** persist graph execution and establish the correct entry path for new versus resumed tasks, including multiple sequential tasks in one long-lived session thread.
 
 ### Create or update
 
@@ -612,30 +487,39 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 - `src/agent/routers/r1_route_after_load.py`.
 - Minimal session metadata/migrations only if required.
 - `src/agent/infra/` helpers and the existing Postgres Docker configuration.
+- `agent resume <thread_id>` CLI command and minimal session metadata/title support only if needed for discovery/display.
+- Optional-checkpointer graph construction so the same graph can run with Postgres persistence enabled or without a checkpointer for ephemeral one-shot runs.
 
 ### Implementation
 
 1. Use Postgres as the only persistence database. Do not add SQLite, Redis, or another database.
 2. Use the supported async LangGraph Postgres checkpointer API for the pinned version. Read installed documentation/source and use its required setup/migration procedure.
 3. Key graph checkpoints by `thread_id`. The checkpointer owns resumable `AgentState`; do not store a second copy of the full graph state in a custom table.
-4. `N1` initializes run context and `thread_id`, restores the saved plan/summary and budgets when applicable, and runs only for a fresh invoke.
-5. `R1` routes a new task to `N2`; an unfinished saved plan routes to `N3` to rebuild context and re-plan. A resumed graph must not re-enter `N1` and overwrite restored state.
-6. Persist only small session metadata if the UI needs session listing. Avoid a session-management framework.
-7. Keep Postgres bound to localhost in Docker Compose, read credentials from configuration, and never print secrets. If Postgres is unavailable, show actionable instructions instead of silently switching databases.
+4. Use the documented, path-safe thread ID convention chosen for this phase. A TUI session gets one stable `thread_id` for its lifetime; each accepted task/run gets a new `run_id`.
+5. `N1` initializes the session only for a genuinely fresh thread. When the same session receives a new user task, preserve prior messages and prior-task summaries/plans/step results, initialize only the new run/task context, and route through `N1 → R1 → N2`. A true resume of an interrupted graph must continue from its checkpoint rather than restarting at `N1`.
+6. `R1` must distinguish at least: (a) fresh session, (b) resumed/interrupted execution, (c) new task in an existing completed session, and (d) an unfinished task/plan that should continue/rebuild context. A new task in an existing session routes to `N2`; it must not accidentally resume the prior task as though it were unfinished.
+7. Implement `agent resume <thread_id>` for explicit resumption. `agent` starts a new persistent TUI session by default; do not silently attach to the most recent session unless the CLI contract is explicitly changed.
+8. Use one graph-building path with an optional checkpointer. Persistent TUI sessions and `agent run --persist` use `AsyncPostgresSaver`; `agent run --no-persist` (the default) runs without a checkpointer and must not require Postgres. Do not duplicate the graph or use another persistence database.
+9. Before launching a mode that requires persistence, perform a cheap Postgres health probe and fail with actionable instructions if it is unavailable. Ollama health probing remains a pre-launch requirement from Phase 4. Do not silently switch to ephemeral mode.
+10. Persist only small session metadata if the UI needs session listing. Avoid a session-management framework.
+11. Keep Postgres bound to localhost in Docker Compose, read credentials from configuration, and never print secrets. If Postgres is unavailable, show actionable instructions instead of silently switching databases.
 
 ### Tests
 
 - A checkpoint survives process restart and resumes the same thread.
-- A new thread passes through `N1`; a resumed thread continues without resetting state.
-- `R1` chooses the expected route for new and unfinished tasks.
-- Missing Postgres produces a clear error without leaking credentials.
+- A new thread passes through `N1`; a resumed/interrupted thread continues without resetting state.
+- A second task in the same thread receives a new `run_id`, preserves prior messages and prior-task records, and routes through `N1 → R1 → N2` without creating a new `thread_id`.
+- `R1` distinguishes fresh session, resumed execution, new task in an existing session, and unfinished task/plan.
+- `agent resume <thread_id>` resumes the specified thread and restores pending interrupts/state.
+- `agent run --persist` checkpoints and can be resumed; `agent run --no-persist` works without Postgres and creates no checkpoint.
+- Missing Postgres in a persistent mode produces a clear error without leaking credentials; ephemeral mode does not require Postgres.
 - Postgres integration tests are marked and run when Docker is available.
 
 **Test gate:** unit tests pass; marked Postgres integration tests pass when configured.
 
 **Done when:** LangGraph resumes a saved thread from Postgres and the entry routing matches the HLD.
 
-**Do not:** duplicate checkpoint state, add another database, or implement planning logic in `N1`.
+**Do not:** duplicate checkpoint state, add another database, or implement task analysis/planning logic in `N1`. Do not make every user message a new thread; do not attach a new task to a different thread by default.
 
 **Report back:** migration/setup notes and restart/resume test results.
 
@@ -658,14 +542,14 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 ### Implementation
 
 1. The checkpointer's pending interrupts are authoritative. The approval inbox is a rebuildable view/cache for the UI, not a second source of truth.
-2. Use `Interrupt.id` to correlate each request with its decision. Validate that a decision matches the pending request and expected payload.
-3. Only `RunController` may consume the graph stream or resume a thread. UI code sends a decision to the controller; it must not call `graph.astream()` or `Command(resume=...)` directly.
-4. Use one pending request at a time in the UI. Other pending interrupts remain queued and visible as pending.
-5. `H3` interrupts before a risky tool performs side effects. On approve, continue to the tool; on deny, send a `ToolMessage` such as `"denied"` back to the agent loop; on abort, terminate through `N12` once Phase 14 adds it.
-6. Make interrupted nodes safe to replay: do not perform the risky action before calling `interrupt()`. On resume, validate the decision and then perform the action once.
-7. Unknown tools are risky. Apply the same policy to native and MCP tools. Do not implement separate approval queues per tool/gate.
-8. Provide a clean seam for H1/H2/H4 to reuse later; do not build their task/planning/recovery behavior before those phases.
-
+2. Enforce the Q2 single-writer contract: while `RunController` is consuming a run stream, it rejects new task submissions. It may accept approval decisions/cancellation through their dedicated paths; these must not start a competing stream/resume call.
+3. Use `Interrupt.id` to correlate each request with its decision. Validate that a decision matches the pending request and expected payload.
+4. Only `RunController` may consume the graph stream or resume a thread. UI code sends a decision to the controller; it must not call `graph.astream()` or `Command(resume=...)` directly.
+5. Use one pending request at a time in the UI. Other pending interrupts remain queued and visible as pending.
+6. `H3` interrupts before a risky tool performs side effects. On approve, continue to the tool; on deny, send a `ToolMessage` such as `"denied"` back to the agent loop; on abort, terminate through `N12` once Phase 14 adds it.
+7. Make interrupted nodes safe to replay: do not perform the risky action before calling `interrupt()`. On resume, validate the decision and then perform the action once.
+8. Unknown tools are risky. Apply the same policy to native and MCP tools. Do not implement separate approval queues per tool/gate.
+9. Provide a clean seam for H1/H2/H4 to reuse later; do not build their task/planning/recovery behavior before those phases.
 ### Tests
 
 - Risky tool pauses before execution.
@@ -789,8 +673,9 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 
 ### Implementation
 
-1. `N2` classifies task type, defines measurable success criteria, estimates ambiguity and risk, and records a concise rationale.
-2. `R2` routes clear tasks to `N3`; only tasks blocked by missing information go to `H1`.
+1. `N2` classifies the new user request as the current task, defines measurable success criteria, estimates ambiguity and risk, and records a concise rationale. It may use relevant prior messages, previous task summaries, plans, and step results from the same thread, but must not confuse old instructions/results with the new task or silently treat the old plan as the new plan.
+2. Keep the session's conversation history and prior-task records intact. The current task receives its own task identity/plan/results; previous task records remain available as context and are not overwritten when the next task begins.
+3. `R2` routes clear tasks to `N3`; only tasks blocked by missing information go to `H1`.
 3. `H1` uses LangGraph `interrupt()`. A user answer returns to `N2` to re-analyze; abort routes to `N12` once available.
 4. `N4` produces a small DAG plan with step IDs, goals, dependencies, agent type, status, verification expectation, and rationale. Assign one catalog agent per step.
 5. Validate the plan structurally and check dependency IDs/cycles. If invalid, retry planning at most twice, then surface the problem instead of building a repair framework.
@@ -879,7 +764,7 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 
 ### Implementation
 
-1. `N8` checks whether the current goal is met, whether progress is being made, and whether token/time/iteration limits are reached. Use the outer LangGraph recursion limit plus the N6 per-step cap.
+1. `N8` checks whether the current goal is met, whether progress is being made, and whether token/time/iteration limits are reached. Use the outer LangGraph recursion limit plus the N6 per-step cap. Apply token, wall-time, iteration, and retry budgets to the current task/run, not as a permanently consumed allowance for the entire long-lived conversation; preserve completed-task usage/history for reporting without charging it against a newly started task's active budget.
 2. `R6` routes to `R7`/the next step when work remains, to `N11` when the plan is complete, and to `N10` when stuck, looping, or over budget.
 3. `N10` classifies the error (`transient`, `context`, `plan`, `agent`, `fatal`, or `verify`), increments the relevant attempt counter, adds a concise recovery hint, and emits an error report.
 4. `R8` uses bounded, explicit rules: retry transient failures or reassign a wrong agent through `N5`; rebuild context/re-plan for context or plan errors via `N3`; route fatal/exhausted failures to `H4`.
@@ -932,8 +817,8 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 4. Redact secrets from logs/events. Never log `.env` contents, database credentials, or secret environment values.
 5. Keep an append-only audit record for risky actions and human decisions, with no unnecessary file contents or secrets.
 6. Test workspace confinement, disallowed commands, prompt injection from repository/tool content, approval bypass attempts, interrupt replay, and secret redaction.
-7. Provide `agent doctor` for configuration, Ollama reachability/model selection, Postgres status, MCP configuration, and data/workspace permissions. Diagnostics are read-only unless the user explicitly asks for a repair.
-8. Verify a clean install, `agent --help`, and a representative local run. Keep setup short and errors actionable.
+7. Provide `agent doctor` for configuration, Ollama reachability/model selection, Postgres status, MCP configuration, and data/workspace permissions. Diagnostics are read-only unless the user explicitly asks for a repair. The launch-time health probes from Phase 4/8 remain cheap preflight checks; `doctor` is the fuller diagnostic command, not a replacement for those checks.
+8. Verify a clean install, `agent --help`, `agent run TASK` in ephemeral mode, `agent run TASK --persist`, `agent` for a new persistent TUI session, and `agent resume <thread_id>`. Keep setup short and errors actionable. Document that `SOURCE_DIR`/`--project PATH` is explicit and the current directory is never auto-detected.
 9. No telemetry by default. Do not add a server/API, OpenWiki, Redis, SQLite, vector DB, or plugin marketplace.
 10. Keep real Ollama/MCP/network tests opt-in. Normal CI must be deterministic and offline.
 11. Replay/transcript export is optional only if the event log supports it cheaply; it must not become a release blocker unless required by the HLD.
@@ -957,6 +842,8 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 ---
 
 ## 4. Dependency order
+
+**Execution status:** Phases 1, 1.5, and 2 are complete. Begin with Phase 3; do not reimplement completed phases.
 
 1. Phase 3: shared events and runner.
 2. Phase 4: temporary graph shell and CLI/TUI path.
@@ -991,7 +878,7 @@ Pin these exact versions in `pyproject.toml` unless a phase explicitly upgrades 
 ## 6. Session checklist
 
 - [ ] Read the project guide, sections 0–2 of this plan, the current phase, and the relevant HLD nodes/panels.
-- [ ] Inspect existing code and tests before editing. Preserve working Phase 1, 1.5, and 2 behavior.
+- [ ] Inspect existing code and tests before editing. Phases 1, 1.5, and 2 are already implemented; preserve their behavior and tests. Start at Phase 3.
 - [ ] Implement exactly the current phase. Do not build later-phase behavior early.
 - [ ] Keep HLD IDs and state/event/tool contracts consistent.
 - [ ] Prefer a direct, testable implementation over speculative abstractions.
