@@ -1,6 +1,11 @@
 """Store for saved models: reads and writes ``model_config.json``.
 
-The file holds only preferences (providers, models, selections).
+The file is the single source of truth for model configuration: saved
+providers and models, their optional base URLs and per-model params, and
+the selections for general use and each role. The wizard only asks what
+that provider genuinely needs (model id; API key for keyed providers;
+base URL for custom endpoints).
+
 API keys are NOT saved here — they go to the OS keyring (see secrets.py).
 """
 
@@ -18,8 +23,20 @@ from pydantic import BaseModel, Field, field_validator
 ROLE_NAMES: tuple[str, ...] = ("plan", "code", "summarize")
 # Providers shown in the `agent model add` menu.
 WIZARD_PROVIDERS: tuple[str, ...] = ("ollama", "openai", "anthropic", "deepseek", "custom")
-# Providers the agent can actually run right now (the rest are saved but refused).
-SUPPORTED_RUNTIME_PROVIDERS: tuple[str, ...] = ("ollama",)
+# The one data table naming the providers that need an API key
+# (Ollama and the user's own servers do not).
+KEY_PROVIDERS: frozenset[str] = frozenset({"openai", "anthropic", "deepseek", "custom"})
+# How each saved provider name maps to the ``model_provider`` string that
+# LangChain's ``init_chat_model`` expects. "custom" is the user's own
+# OpenAI-compatible endpoint, served by the openai integration at the
+# saved base URL.
+LANGCHAIN_PROVIDERS: dict[str, str] = {
+    "ollama": "ollama",
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "deepseek": "deepseek",
+    "custom": "openai",
+}
 # File format version of model_config.json. Bump it when the JSON shape changes.
 _CONFIG_VERSION = 1
 
@@ -35,7 +52,9 @@ class ModelEntry(BaseModel):
     """One saved model.
 
     ``id`` is the model name the provider knows, e.g. "qwen2.5-coder:14b".
-    ``params`` holds extra provider settings and may be empty.
+    ``params`` holds extra provider settings (forwarded verbatim to
+    ``init_chat_model`` as kwargs, e.g. ``{"num_ctx": 8192}`` for Ollama
+    context windows). The wizard never asks for them; edit the JSON.
     """
 
     id: str
@@ -53,8 +72,8 @@ class ModelEntry(BaseModel):
 class ProviderEntry(BaseModel):
     """All saved models of one provider.
 
-    ``base_url`` is needed only for custom (OpenAI-compatible) providers;
-    for Ollama the base url comes from .env instead.
+    ``base_url`` is needed for "custom" (an OpenAI-compatible endpoint) and
+    can optionally override the default endpoint of any provider.
     """
 
     base_url: str | None = None

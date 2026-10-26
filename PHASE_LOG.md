@@ -22,7 +22,34 @@
    - *Detail:* section 2.5 documents `platformdirs.user_data_dir("agent")`; the implementation uses `user_data_dir("agent", "tamal_saha_own")` plus the `AGENT_DATA_DIR` env alias. Same env override, same semantics; only the default path's app-author component differs.
    - *Needs:* optional plan-section-2.5 note. **No code action** — code wins; do not re-point the data dir to match the doc.
 
+### Open question 3 (Phase 3.5 follow-ups parked)
+
+Keep these out of Phase 3.5, revisit later:
+- Removing the `{PROVIDER}_API_KEY` env-var precedence from `secrets.py` (credentials are not
+  model config; the escape hatch stays until the multi-provider phase decides).
+- A wizard prompt or CLI command for per-model params (e.g. `agent model set param`) — params
+  is advanced JSON-only editing in `model_config.json` for now (documented on `ModelEntry`).
+- Install-on-demand for provider integration packages; Phase 3.5 only raises a `ConfigError`
+  naming the exact `uv add langchain-...` fix.
+- `num_ctx` awareness: without per-model params, Ollama models run at the server's default
+  context (2048). Phase 7 may surface a warning or set a sane default via params.
+
+## Phase 3.5 — `model_config.json` as the single source of truth (provider-generic runtime)
+
+- Contract change (user-approved; plan contract edited by the user, this entry records the implementation): all model/provider settings leave `.env`; `model_config.json` is the only model configuration source. `Settings` no longer holds `provider`, `model_name`, `model_plan`/`model_code`/`model_summarize`, `ollama_base_url`/`ollama_num_ctx`/`ollama_keep_alive`/`validate_model_on_init`; `config.get_model_name` is deleted (provider calls the resolver directly). Phase-1's "empty MODEL_NAME raises ConfigError naming the env var" check is retired accordingly.
+- `store.py`: `SUPPORTED_RUNTIME_PROVIDERS` deleted (no runtime refusals). Added the two generic tables: `KEY_PROVIDERS` (which providers need an API key; moved from `cli_model.py`'s `_NEEDS_KEY`) and `LANGCHAIN_PROVIDERS` (saved provider name → `model_provider` string for `init_chat_model`; `custom` maps to `openai` at its saved base URL). `ModelEntry.params` is documented as the advanced JSON-only override pocket forwarded verbatim as `init_chat_model` kwargs (wizard never asks for it).
+- `resolver.py` rewritten: chain is now role selection → general selection → `ConfigError` naming only `agent model add`/`agent model use` (no `.env` wording anywhere). `ResolvedModel` now carries everything the builder needs: `provider`, `langchain_provider`, `model_id`, `base_url` (only when saved), `params`. A selection pointing at a model that is not saved (hand-edited JSON) raises `ConfigError` instead of inventing anything. `ensure_runtime_provider` deleted.
+- `provider.py`: `_build_model` is provider-neutral — kwargs = saved params (+ saved `base_url` when present); keyed providers get `api_key` from the keyring (`ConfigError` naming `agent model add` when missing); a missing provider integration package surfaces as `ConfigError` naming the exact `uv add langchain-...` fix (wrapped `ImportError`, verified: `init_chat_model` raises ImportError with the package name). The Ollama kwargs block (`base_url`/`num_ctx`/`keep_alive`/`validate_model_on_init` from Settings) is gone; the `cast` is replaced by an annotated variable. Accepted consequence: without per-model params, Ollama models run at the server's default context (2048) — fixing that is a data edit (`{"num_ctx": 8192}`), never provider code.
+- `cli_model.py`: uses `store.KEY_PROVIDERS`; the obsolete "(saved - runtime: ollama-only for now)" list note is removed. Wizard flow unchanged (ollama → model id only; keyed providers → key; custom → base URL + key), matching the contract.
+- `.env` / `.env.example`: model and OLLAMA_* lines removed; header now says model setup is done via `agent model` commands. Stale env vars in any user's local `.env` are silently ignored by `Settings` (`extra="ignore"`).
+- `Settings` stop-switch cleanup (user decision, same session): `max_total_tokens` (the iteration and wall-clock stops already bound loopy behavior, and local tokens cost nothing) and `max_parallel` (subagent fan-out is unbounded by design — the user decides how many run). Remaining stops: `max_iterations_per_step=25`, `tool_timeout_s=120`, `max_wall_minutes=60`, plus `max_cost_usd=5.0` kept for UI parity.
+- Tests: `test_resolver.py` rewritten without env cases (role wins, inherit-general, resolve(None), error messages without `MODEL_NAME`, keyed/custom/provider mappings, params carried through, hand-edited JSON failure); `test_provider.py` rewritten for the generic builder (factory tests kept; real ChatOllama build from a saved selection; params forwarded to a captured `init_chat_model`; keyed provider passes `api_key`; missing key → refusal; custom → openai gateway mapping; missing integration package → ConfigError naming the package — real behavior, `langchain-openai` is not installed in this project; empty store → JSON-chain error); `test_config.py` keeps data-dir tests and asserts the model fields are gone; `test_modelconfig.py` gains provider-table consistency checks; `test_live_ollama.py` uses `resolve_model` instead of the deleted `get_model_name`.
+- Gates: ruff clean; mypy strict clean (29 files); 90 passed + 3 skipped (live).
+- Smoke: `uv run agent model list` shows the saved general model (★) and role inheritance; `resolve_model(None/plan/code/summarize)` against the real `model_config.json` resolves through the JSON-only chain with `.env` holding no model settings.
+- Note for Phase 8: `resolve_model`/`ResolvedModel` shape (params, base_url) may be worth caching — no action taken.
+
 ## Phase 3 — Event contract, emitter, stream mapper, graph runner
+
 
 - Verified the installed LangGraph (1.2.16) streaming API before coding, with throwaway experiment scripts (deleted afterwards). Confirmed behaviors that the code now relies on:
   - `graph.astream(..., stream_mode=["custom","updates","messages"], subgraphs=True, version="v2")` yields dict-like parts with keys `type`/`ns`/`data` (the typed `langgraph.types.StreamPart` union: `ValuesStreamPart | UpdatesStreamPart | MessagesStreamPart | CustomStreamPart | ...`).

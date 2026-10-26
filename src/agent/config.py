@@ -32,9 +32,12 @@ def _default_data_dir() -> Path:
 
 
 class Settings(BaseSettings):
-    """Every agent setting in one place, loaded from .env and env vars.
+    """Non-model application settings, loaded from .env and env vars.
 
-    Precedence: real environment variables > .env file > defaults below.
+    Model selection lives in ``model_config.json`` (resolved by
+    ``agent.modelconfig.resolver``); this class never holds model or
+    provider settings. Precedence: real environment variables > .env file
+    > defaults below.
     """
 
     model_config = SettingsConfigDict(
@@ -45,22 +48,6 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    # The provider to use for the agent's LLM backend. Currently, only "ollama" is supported.
-    provider: Literal["ollama"] = "ollama"
-
-    # General model name; each role below may override it.
-    model_name: str = Field(default="")
-    # Role-specific overrides: empty means "fall back to model_name".
-    model_plan: str = Field(default="")  # planning tasks
-    model_code: str = Field(default="")  # coding tasks
-    model_summarize: str = Field(default="")  # summarization tasks
-
-    # How to reach Ollama.
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_num_ctx: int = 8192
-    ollama_keep_alive: str = "30m"
-    validate_model_on_init: bool = False
-
     # The agent's own storage folder (workspaces, artifacts, run logs).
     data_dir: Path = Field(
         default_factory=_default_data_dir,
@@ -68,12 +55,13 @@ class Settings(BaseSettings):
     )
 
     # Stop switches so a confused model cannot loop forever.
+    # Iterations and wall-clock time bound loopy behavior; parallel fan-out
+    # and token counts are deliberately unbounded (the user may want many
+    # subagents, and local tokens cost nothing).
     max_iterations_per_step: int = 25
-    max_parallel: int = 4
     tool_timeout_s: int = 120
 
     # Whole-session budget stops.
-    max_total_tokens: int = 500_000
     max_wall_minutes: int = 60
     max_cost_usd: float = 5.0  # kept for UI parity; local models cost $0
 
@@ -90,23 +78,3 @@ def get_settings() -> Settings:
     object, so settings do not change mid-session.
     """
     return Settings()
-
-
-def get_model_name(role: str | None = None) -> str:
-    """Return the model name the agent must use for the role.
-
-    Env vars (MODEL_PLAN, MODEL_NAME, ...) are checked first, then the saved
-    selections in model_config.json. If there is nothing, ``ConfigError`` is
-    raised with the exact fix.
-
-    Raises:
-        ConfigError: when no model is selected, or the selected provider
-            cannot be used yet (only Ollama runs today).
-        ValueError: when ``role`` is not plan/code/summarize (or None).
-    """
-    # Import here to avoid a circular import: resolver imports this module.
-    from agent.modelconfig.resolver import ensure_runtime_provider, resolve_model
-
-    resolved = resolve_model(role)
-    ensure_runtime_provider(resolved.provider)
-    return resolved.model_id

@@ -110,3 +110,15 @@ def test_version_guard(tmp_settings: Settings) -> None:
     path.write_text('{"version": 2}', encoding="utf-8")
     with pytest.raises(store.ConfigFormatError, match="unsupported config version"):
         store.load_config(path)
+
+
+def test_provider_tables_are_consistent() -> None:
+    """Every wizard provider is in both tables; the mapping covers all of them."""
+    assert set(store.WIZARD_PROVIDERS) == set(store.LANGCHAIN_PROVIDERS)
+    assert set(store.LANGCHAIN_PROVIDERS) >= set(store.KEY_PROVIDERS)
+
+
+def test_custom_provider_is_serviced_by_the_openai_gateway() -> None:
+    """init_chat_model is asked for "openai" when the user saved a custom URL."""
+    assert store.LANGCHAIN_PROVIDERS["custom"] == "openai"
+    assert "custom" in store.KEY_PROVIDERS

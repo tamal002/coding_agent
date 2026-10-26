@@ -1,7 +1,7 @@
 """The ``agent model`` sub-commands: add, list, use and remove saved models.
 
 `add` asks the user step by step (provider → model → API key if needed).
-Model choices are saved to ``model_config.json``; API keys go to the OS
+``model_config.json`` is the single source of truth; API keys go to the OS
 keyring, never to a file.
 """
 
@@ -21,9 +21,6 @@ app = typer.Typer(
     "Keys are stored in the OS keyring, never on disk."
 )
 console = Console()
-
-# Providers that need an API key (Ollama does not need one).
-_NEEDS_KEY = frozenset({"openai", "anthropic", "deepseek", "custom"})
 
 
 def _load() -> store.ModelConfig:
@@ -141,12 +138,7 @@ def list_models() -> None:
                 and general.model_id == model.id
             )
             marker = "[bold green]★ [/bold green]" if selected else "  "
-            runtime_note = (
-                ""
-                if provider in store.SUPPORTED_RUNTIME_PROVIDERS
-                else "  (saved - runtime: ollama-only for now)"
-            )
-            console.print(f"{marker}{model.id}{runtime_note}")
+            console.print(f"{marker}{model.id}")
 
     console.rule("Effective use by mode")
     for role in ("general", *store.ROLE_NAMES):
@@ -243,7 +235,7 @@ def remove() -> None:
         if store.remove_model(config, provider, model_id):
             _save(config)
             console.print(f"[green]Removed {provider}/{model_id}.[/green]")
-            if provider not in config.providers and provider in _NEEDS_KEY:
+            if provider not in config.providers and provider in store.KEY_PROVIDERS:
                 if typer.confirm(
                     "That provider has no models left. Remove its stored API key?",
                     default=False,

@@ -147,14 +147,12 @@ OLLAMA_KEEP_ALIVE=30m
 
 Rules:
 
-- `.env` is local, git-ignored, and never committed.
-- Every model variable may be empty until the human fills it.
-- `get_model_name(role)` returns the role override or `MODEL_NAME`.
-- If both are empty, raise `ConfigError` naming the exact env var. **Never guess a model name.**
+- Model selection lives only in `model_config.json` (`agent model add` / `agent model use`); `.env` holds no model settings. **Never guess a model name.**
 - `validate_model_on_init=False`; do not make a network call during model construction.
 - Cost for local Ollama is always `0.0`; UI shows `$0.00 (local)`.
-- `max_iterations_per_step=25`, `max_parallel=4`, `tool_timeout_s=120`.
-- Budget defaults: `max_total_tokens=500_000`, `max_wall_minutes=60`, `max_cost_usd=5.0` (kept for UI parity; local cost is zero).
+- Stop switches: `max_iterations_per_step=25`, `tool_timeout_s=120`, `max_wall_minutes=60`.
+- Parallel subagent fan-out and total tokens are deliberately unbounded (user may want many subagents; local tokens are free).
+- Budget default: `max_cost_usd=5.0` (kept for UI parity; local cost is zero).
 
 Data paths:
 

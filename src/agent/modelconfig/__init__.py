@@ -1,8 +1,9 @@
 """Model selection store and resolution."""
 
 from agent.modelconfig.store import (
+    KEY_PROVIDERS,
+    LANGCHAIN_PROVIDERS,
     ROLE_NAMES,
-    SUPPORTED_RUNTIME_PROVIDERS,
     WIZARD_PROVIDERS,
     ConfigFormatError,
     ModelConfig,
@@ -22,8 +23,9 @@ from agent.modelconfig.store import (
 )
 
 __all__ = [
+    "KEY_PROVIDERS",
+    "LANGCHAIN_PROVIDERS",
     "ROLE_NAMES",
-    "SUPPORTED_RUNTIME_PROVIDERS",
     "WIZARD_PROVIDERS",
     "ConfigFormatError",
     "ModelConfig",
