@@ -54,6 +54,11 @@ async def run_graph_stream(
     stream_config: RunnableConfig = config or {
         "configurable": {"thread_id": thread_id}
     }
+    # The identity nodes stamp on events they build themselves; the event
+    # helper reads it back from the LangGraph config.
+    metadata = dict(stream_config.get("metadata") or {})
+    metadata["agent_run_id"] = run_id
+    stream_config = {**stream_config, "metadata": metadata}
     # Interrupt ids already reported in this run; LangGraph re-announces
     # still-pending interrupts after a resume, and repeats must not reach
     # the consumer twice.

@@ -33,6 +33,112 @@ Keep these out of Phase 3.5, revisit later:
   naming the exact `uv add langchain-...` fix.
 - `num_ctx` awareness: without per-model params, Ollama models run at the server's default
   context (2048). Phase 7 may surface a warning or set a sane default via params.
+- Probe coverage for integrations whose built model has no `base_url` (Phase 4 finding:
+  the real general model resolves fine but `ChatOllama.base_url` is `None` when no base
+  URL is saved, so the Phase 4 probe reports "nothing to probe" and passes). With the
+  provider-generic runtime there is no provider code to name a default endpoint, so the
+  probe is a no-op for such setups and a real reachability failure surfaces at the first
+  model call. Revisit later: a generic way to ask an integration for its default endpoint,
+  or base-URL editing for non-custom providers.
+
+## Phase 4 — Minimal graph shell, CLI and Textual interface
+
+- Created `src/agent/graph.py`: the temporary one-node shell (`START -> respond -> END`,
+  local `ShellState(task)` typed dict; the shared `AgentState` stays empty until the real
+  HLD nodes arrive). The node is labeled "N0_respond (phase-4 placeholder)". It calls
+  `get_model(None)` (the Phase 2/3.5 door), streams the reply with `model.astream` — the
+  text reaches consumers as `text_delta` events through the runner's `messages` mode —
+  collects it, and emits `node_entered` + `run_finished(status="done", changed_files=[],
+  summary=reply)`. Later phases replace the node body; the shape stays.
+- Node-emitted events needed the caller's run/thread identity, so:
+  - `runtime/runner.py` stamps `agent_run_id` into the LangGraph invocation metadata
+    (merged `config` is preserved; default `configurable.thread_id` kept);
+  - `events/emit.py` gained `current_run_identity()` — reads `agent_run_id`/`thread_id`
+    back from `langgraph.config.get_config()` inside a node; empty strings outside a
+    run (sink mode/UI tests still pass explicit ids via `make_event`).
+- Created `src/agent/infra/ids.py`: `new_thread_id(scope)` (e.g. `tui-20261027-...-hex`,
+  matches the locked `^[A-Za-z0-9_-]{1,64}$`) and `new_run_id()` (`r-<hex12>`), plus
+  `assert_valid_id`/`ID_PATTERN` for later phases to validate inbound ids.
+- Created `src/agent/llm/reach.py`: provider-neutral reachability probe.
+  `probe_model_connection(model)` reads the model's `base_url` attribute and issues one
+  short GET (`httpx`, 3 s timeout); ANY HTTP response counts as reachable (401/404 still
+  proves the server is up); connection errors/timeouts fail with an actionable message
+  ("agent model list"). Models without `base_url` pass with "nothing to probe" (see the
+  parked "Later" item above). Injected `httpx.BaseTransport` for tests (MockTransport).
+- Created `src/agent/ui/plain.py` (plain strings only, no third-party imports):
+  `format_plain(event) -> str | None`; `None` = inline delta text. Delta/`log`/`status`/
+  `interrupt`/`run_finished`/`error` render directly; remaining kinds fall back to a
+  generic one-liner until their phases render properly.
+- Created `src/agent/ui/app.py` + `app.tcss` (Textual 8.2.8): minimal app with a status
+  line (model / project / ephemeral|persistent), `RichLog` transcript, bottom Input,
+  Footer. `AUTO_FOCUS = "#prompt"`, command palette disabled. Bindings: Ctrl+C cancels
+  the active run, Ctrl+Q quits (both priority bindings, available while busy).
+  Micro-decisions: busy submissions are rejected with a visible line ("a run is active —
+  wait or press Ctrl+C to cancel") and never queued (the input stays editable); each
+  accepted prompt starts a fresh `run_id` on the same `thread_id`; one run at a time.
+  Transcript writes tolerate the unmount race (Ctrl+Q during a run). Cancelled runs end
+  by swallowing `CancelledError` inside the task (nobody awaits it) — observable facts
+  for tests: task done, no notice duplication, input usable again.
+- Rewrote `src/agent/cli.py`: `agent` (no sub-command) probes then opens the TUI;
+  `agent run TASK [--plain|--json] [--project PATH] [--persist|--no-persist]`;
+  `agent probe` runs the check on its own. Both `run` and the TUI root probe first and
+  exit 1 with the actionable message before anything opens; a `ConfigError` (no saved
+  model, missing key/package) also counts as "not reachable" with its own fix text —
+  no tracebacks. `--plain`/`--json` and `--persist`/`--no-persist` are mutually
+  exclusive; flags beat the `Settings.persist`/`SOURCE_DIR` config preference.
+  `_resolve_project`: `--project` beats `SOURCE_DIR`, cwd is never auto-detected, a
+  non-existent configured/supplied path is an error (exit 2). A compact header line
+  (`model: … project: … mode: …`) prints on stdout in plain mode and on stderr in JSON
+  mode so `--json` stdout stays valid JSON Lines. `cli.py` imports no rich/textual
+  (`cli_model.py` keeps its pre-existing rich, unchanged).
+- Config: `Settings` gained `source_dir: Path | None` (=SOURCE_DIR) and
+  `persist: bool = False` (=PERSIST); `.env.example` documents both. No workspace-copy
+  implementation (Phase 5), no checkpointer (Phase 8), no `agent resume` (Phase 8).
+- Tests: `tests/unit/test_reach.py` (200/401/404/500 reachable; ConnectError and
+  ConnectTimeout fail with the actionable fix; no-endpoint models skip cleanly);
+  `tests/unit/test_ids.py` (pattern contract, uniqueness, bad-value rejection);
+  `tests/graph/test_shell.py` (shell event order node_entered → text_delta →
+  run_finished via the real runner + scripted fake; events carry the caller's
+  run/thread ids exactly); `tests/cli/test_run.py` (13 tests: JSON Lines validity and
+  event order, plain rendering, flag mutual exclusion, persist reporting, project
+  precedence over SOURCE_DIR, no cwd auto-detection, missing project dir error,
+  unreachable endpoint blocks the run AND the TUI root with no events printed,
+  unselected model fails with the actionable fix, `agent probe` exit 1);
+  `tests/ui/test_tui.py` with `SlowScriptedChatModel` (submits get the scripted reply;
+  second submit during a run is visibly rejected and not queued; Ctrl+C ends the task
+  with "no stuck worker" facts; rerun after cancel works; Ctrl+Q quits; status line
+  reports mode/project).
+- Gate: ruff clean; mypy strict clean (34 source files); 122 passed + 3 skipped (live).
+- Pyconfig note: added `[tool.ruff.lint.flake8-bugbear] extend-immutable-calls =
+  ["typer.Option", "typer.Argument"]` (ruff 0.13 B008 flags Typer's documented
+  `typer.Option(...)` defaults whenever the parameter annotation is `Path`-like) and
+  added the PEP-561 `src/agent/py.typed` marker (mypy 2.4 refuses to type-check an
+  installed package without it).
+- Smokes: `agent --help` / `agent run --help` show the full flag surface; `agent probe`
+  against the real config prints "nothing to probe" (see the Later item).
+- Phase-4 redesign (user decision, same session): **the Textual TUI is replaced by a
+  plain terminal session** — Claude-Code-like, monochrome, banner + `>` prompt + streamed
+  output. `src/agent/ui/app.py`/`app.tcss` deleted; new `src/agent/ui/terminal.py`
+  (banner, stdin session loop via `asyncio.to_thread(input)`, `exit`/`quit` words to
+  leave, Ctrl+C ends the process cleanly; a REPL reads one task per prompt so nothing is
+  ever queued). `agent run` reuses the same streaming helpers (`stream_task`);
+  `print_header` stays stderr-routed for `--json`. Calm event wording shares `plain.py`
+  (Claude-Code chat pattern, refined after the user pointed at
+  github.com/siteboon/claudecodeui — its chat/tool-card/session-header look, adapted to
+  a linear terminal; no code copied, AGPL): actions render as `⏺` bullets with short
+  verbs (`⏺ thinking`, `⏺ reading src/x.py`) and results as subordinate `⎿` lines
+  (`⎿ done · 12ms`, `⎿ applied a.py`); verb tables `NODE_VERBS`/`TOOL_VERBS` in
+  `plain.py` are what other phases extend. The old TUI-only `format_action` helper was
+  removed as dead code. Project resolution now defaults to the **cwd** (user decision,
+  Claude-Code-like: least surprise beats the manual-setup safety rule) — precedence is
+  `--project` > `SOURCE_DIR` > `Path.cwd()`, validated as before; the plan's "never
+  cwd" wording is a contract revision owed by the user.
+  Session tests (`tests/ui/test_terminal.py`)
+  feed stdin through the CLI runner (banner → run → exit, blank-line skips, clean EOF
+  close); the old Textual pilot tests were removed with their file; direct formatter
+  tests for the not-yet-wired tool/patch events live in `tests/ui/test_plain.py`. The
+  `textual`/`pytest-textual-snapshot` deps stay pinned for now (user may drop them in a
+  later contract edit).
 
 ## Phase 3.5 — `model_config.json` as the single source of truth (provider-generic runtime)
 

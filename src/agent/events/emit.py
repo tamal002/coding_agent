@@ -14,13 +14,31 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from langgraph.config import get_stream_writer
+from langgraph.config import get_config, get_stream_writer
 
 from agent.events.models import AgentEvent, parse_event
 
 # Where events land when there is no graph run around them (tests, scripts,
 # small tools). Only ever held in memory, never persisted.
 _sink: list[AgentEvent] = []
+
+
+def current_run_identity() -> tuple[str, str]:
+    """The (run_id, thread_id) the current LangGraph node should stamp on events.
+
+    The runner puts both into the graph invocation's LangGraph config
+    (``metadata``/``configurable``). Outside a graph run (tests, sink mode)
+    both are empty strings, so callers know not to fake an identity.
+    """
+    try:
+        config = get_config()
+    except RuntimeError:
+        return ("", "")
+    metadata = config.get("metadata") or {}
+    configurable = config.get("configurable") or {}
+    run_id = str(metadata.get("agent_run_id") or "unknown")
+    thread_id = str(configurable.get("thread_id") or "unknown")
+    return (run_id, thread_id)
 
 
 def make_event(

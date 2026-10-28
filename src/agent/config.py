@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     max_wall_minutes: int = 60
     max_cost_usd: float = 5.0  # kept for UI parity; local models cost $0
 
+    # Project the agent works on: set via SOURCE_DIR, overridden by
+    # --project on `agent run`. Never auto-detected from the current dir.
+    source_dir: Path | None = None
+
+    # One-shot run persistence (Phase 8 wires the real checkpointer);
+    # --persist/--no-persist override this preference. Default: ephemeral.
+    persist: bool = False
+
     # Approval behavior: who must approve risky actions, and how long to wait.
     permission_mode: Literal["ask", "auto-safe", "trusted"] = "ask"
     approval_timeout_s: int = 0  # 0 = wait forever for the user's decision
